@@ -6,9 +6,11 @@
  */
 
 #include <folly/ScopeGuard.h>
+
 #include "watchman/Client.h"
 #include "watchman/Errors.h"
 #include "watchman/Logging.h"
+#include "watchman/PerfSample.h"
 #include "watchman/Shutdown.h"
 #include "watchman/root/Root.h"
 #include "watchman/root/resolve.h"
@@ -86,11 +88,18 @@ resolveRootByName(Client* client, const char* rootName, bool create) {
       root = w_root_resolve(rootName, create);
     }
 
+    if (client->dispatch_command) {
+      addRootMetadataToEvent(
+          root->getRootMetadata(), *client->dispatch_command);
+    }
+
     if (client->perf_sample) {
-      root->addPerfSampleMetadata(*client->perf_sample);
+      client->perf_sample->add_root_metadata(root->getRootMetadata());
     }
     return root;
-
+  } catch (const RootNotConnectedError&) {
+    // pass through RootNotConnectedError
+    throw;
   } catch (const std::exception& exc) {
     RootResolveError::throwf(
         "unable to resolve root {}: {}{}",

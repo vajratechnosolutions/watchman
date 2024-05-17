@@ -7,11 +7,14 @@
 
 #include <fmt/core.h>
 #include <folly/String.h>
+
 #include "watchman/Connect.h"
 #include "watchman/Logging.h"
 #include "watchman/PDU.h"
 #include "watchman/PerfSample.h"
 #include "watchman/Shutdown.h"
+#include "watchman/telemetry/LogEvent.h"
+#include "watchman/telemetry/WatchmanStructuredLogger.h"
 #include "watchman/watchman_stream.h"
 
 namespace watchman {
@@ -154,17 +157,30 @@ void do_clock_check(watchman_stream* client) {
   try {
     auto roots = get_watch_list(client);
     for (auto& r : roots.array()) {
+      ClockTest clockTest;
+      clockTest.root = r.toString();
       PerfSample sample("clock-test");
       sample.add_meta("root", json_object({{"path", r}}));
       try {
         check_clock_command(client, r);
       } catch (const std::exception& ex) {
         log(watchman::ERR, "Failed do_clock_check : ", ex.what(), "\n");
+        clockTest.error = ex.what();
         sample.add_meta("error", w_string_to_json(ex.what()));
         sample.force_log();
       }
-      sample.finish();
-      sample.log();
+
+      if (sample.finish()) {
+        sample.log();
+      }
+
+      const auto& [samplingRate, eventCount] =
+          getLogEventCounters(LogEventType::ClockTestType);
+      // Log if override set, or if we have hit the sample rate
+      if (sample.will_log || eventCount == samplingRate) {
+        clockTest.event_count = eventCount != samplingRate ? 0 : eventCount;
+        getLogger()->logEvent(clockTest);
+      }
     }
   } catch (const std::exception& ex) {
     // Catch std::domain_error and std::runtime_error

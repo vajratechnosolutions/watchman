@@ -7,6 +7,7 @@
 
 include "eden/fs/config/eden_config.thrift"
 include "fb303/thrift/fb303_core.thrift"
+include "thrift/annotation/thrift.thrift"
 
 namespace cpp2 facebook.eden
 namespace java com.facebook.eden.thrift
@@ -1052,6 +1053,20 @@ enum HgImportCause {
   PREFETCH = 3,
 }
 
+enum FetchedSource {
+  LOCAL = 0,
+  REMOTE = 1,
+  // The data is fetched. However, the fetch mode was AllowRemote
+  // and on the Eden side the source of the fetch is unknown.
+  // It could be local or remote
+  UNKNOWN = 2,
+  // The data is not fetched yet.
+  // We don't know the source on some of the Sapling events. For example,
+  // on the start events: before we fetch the data we don't know where
+  // we will be able to find it
+  NOT_AVAILABLE_YET = 3,
+}
+
 struct HgEvent {
   1: TraceEventTimes times;
 
@@ -1067,6 +1082,7 @@ struct HgEvent {
   7: optional RequestInfo requestInfo;
   8: HgImportPriority importPriority;
   9: HgImportCause importCause;
+  10: FetchedSource fetchedSource;
 }
 
 /**
@@ -1297,6 +1313,13 @@ struct PrefetchParams {
   // When set, the globs list must be empty and the globbing pattern will be obtained
   // from an online service.
   7: optional PredictiveFetch predictiveGlob;
+  // When true, returns list of prefetched files.
+  8: bool returnPrefetchedFiles = false;
+}
+
+/** Result for prefetchFiles(). */
+struct PrefetchResult {
+  1: optional Glob prefetchedFiles;
 }
 
 /** Params for globFiles(). */
@@ -1916,6 +1939,8 @@ service EdenService extends fb303_core.BaseService {
   Glob globFiles(1: GlobParams params) throws (1: EdenError ex);
 
   /**
+   * DEPRECATED: use prefetchFilesV2
+   *
    * Has the same behavior as globFiles, but should be called in the case of a prefetch.
    * This request could be deprioritized since it will be assumed that this call is used
    * for optimization and the result not relied on for operations. This command does not
@@ -1923,6 +1948,17 @@ service EdenService extends fb303_core.BaseService {
    */
   void prefetchFiles(1: PrefetchParams params) throws (1: EdenError ex) (
     priority = 'BEST_EFFORT',
+  );
+
+  /**
+   * Has the same behavior as globFiles, but should be called in the case of a prefetch.
+   * This call is used when prefetching instead of globbing, to allow for different behaviors.
+   * This command returns a PrefetchResult, which contains the list of prefetched files.
+   * If returnPrefetchedFiles is true, this command will return the prefetched files.
+   */
+  @thrift.Priority{level = thrift.RpcPriority.BEST_EFFORT}
+  PrefetchResult prefetchFilesV2(1: PrefetchParams params) throws (
+    1: EdenError ex,
   );
 
   /**

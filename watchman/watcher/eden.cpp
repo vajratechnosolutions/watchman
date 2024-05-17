@@ -142,11 +142,27 @@ std::string resolveSocketPath(w_string_piece rootPath) {
 
   return *config->get_qualified_as<std::string>("Config.socket");
 #else
-  auto path = fmt::format("{}/.eden/socket", rootPath);
-  // It is important to resolve the link because the path in the eden mount
-  // may exceed the maximum permitted unix domain socket path length.
-  // This is actually how things our in our integration test environment.
-  return readSymbolicLink(path.c_str()).string();
+  try {
+    auto path = fmt::format("{}/.eden/socket", rootPath);
+    // It is important to resolve the link because the path in the eden mount
+    // may exceed the maximum permitted unix domain socket path length.
+    // This is actually how things our in our integration test environment.
+    return readSymbolicLink(path.c_str()).string();
+  } catch (const std::system_error& e) {
+    // When Eden fails during graceful takeover, the mount can exist, but it
+    // is disconnected. In this case, we can't use the eden watcher. Log this
+    // error and return no address - this will result makeThriftChannel failing
+    // with an AsyncSocketException.
+    log(DBG,
+        fmt::format(
+            "Failed to read EdenFS root when mount exists: {} ."
+            "{} appears to be a disconnected EdenFS mount. "
+            "Try running `eden doctor` to bring it back online and "
+            "then retry your watch.",
+            e.what(),
+            rootPath));
+    return std::string();
+  }
 #endif
 }
 
@@ -1474,8 +1490,21 @@ std::shared_ptr<QueryableView> detectEden(
   }
 
   // Given that the readlink() succeeded, assume this is an Eden mount.
-  auto edenRoot =
-      readSymbolicLink(fmt::format("{}/.eden/root", root_path).c_str());
+  w_string edenRoot;
+  try {
+    edenRoot =
+        readSymbolicLink(fmt::format("{}/.eden/root", root_path).c_str());
+  } catch (const std::system_error& e) {
+    // When Eden fails during graceful takeover, the mount can exist, but it
+    // is disconnected. In this case, we can't use the eden watcher. Log this
+    // error and throw.
+    log(DBG, "Failed to read EdenFS root when mount exists: ", e.what());
+    RootNotConnectedError::throwf(
+        "{} appears to be a disconnected EdenFS mount. "
+        "Try running `eden doctor` to bring it back online and "
+        "then retry your watch",
+        root_path);
+  }
 
 #endif
   if (edenRoot != root_path) {

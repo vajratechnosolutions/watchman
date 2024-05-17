@@ -10,11 +10,30 @@
 #include <folly/portability/SysTime.h>
 #include <string>
 #include <vector>
+
 #include "watchman/thirdparty/jansson/jansson.h"
 
 // Performance metrics sampling
 
 namespace watchman {
+
+/**
+ * Contains metadata regarding root used in structured logging.
+ */
+struct RootMetadata {
+  w_string root_path;
+  int64_t recrawl_count;
+  bool case_sensitive;
+  w_string watcher;
+};
+
+template <typename T>
+void addRootMetadataToEvent(const RootMetadata& root_metadata, T& event) {
+  event.root = root_metadata.root_path.string();
+  event.recrawl = root_metadata.recrawl_count;
+  event.case_sensitive = root_metadata.case_sensitive;
+  event.watcher = root_metadata.watcher.string();
+}
 
 class PerfSample {
  public:
@@ -37,6 +56,8 @@ class PerfSample {
   // If non-zero, force logging on if the wall time is greater
   // that this value
   double wall_time_elapsed_thresh{0};
+
+  double get_perf_sampling_thresh() const;
 
 #ifdef HAVE_SYS_RESOURCE_H
   // When available (posix), record these process-wide stats.
@@ -68,6 +89,9 @@ class PerfSample {
   // Mark the end of a sample.  Returns true if the policy is to log this
   // sample.  This allows the caller to conditionally build and add metadata
   bool finish();
+
+  // Annotate sample with Root metadata.
+  void add_root_metadata(const RootMetadata& root_metadata);
 
   // Annotate the sample with metadata
   void add_meta(const char* key, json_ref&& val);

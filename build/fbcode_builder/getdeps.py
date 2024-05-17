@@ -561,6 +561,10 @@ class BuildCmd(ProjectCmdBase):
         for m in projects:
             fetcher = loader.create_fetcher(m)
 
+            if args.build_skip_lfs_download and hasattr(fetcher, "skip_lfs_download"):
+                print("skipping lfs download for %s" % m.name)
+                fetcher.skip_lfs_download()
+
             if isinstance(fetcher, SystemPackageFetcher):
                 # We are guaranteed that if the fetcher is set to
                 # SystemPackageFetcher then this item is completely
@@ -652,7 +656,11 @@ class BuildCmd(ProjectCmdBase):
 
                     # Only populate the cache from continuous build runs, and
                     # only if we have a built_marker.
-                    if args.schedule_type == "continuous" and has_built_marker:
+                    if (
+                        not args.skip_upload
+                        and args.schedule_type == "continuous"
+                        and has_built_marker
+                    ):
                         cached_project.upload()
                 elif args.verbose:
                     print("found good %s" % built_marker)
@@ -923,7 +931,7 @@ class GenerateGitHubActionsCmd(ProjectCmdBase):
 
     def run_project_cmd(self, args, loader, manifest):
         platforms = [
-            HostType("linux", "ubuntu", "18"),
+            HostType("linux", "ubuntu", "22"),
             HostType("darwin", None, None),
             HostType("windows", None, None),
         ]
@@ -936,6 +944,11 @@ class GenerateGitHubActionsCmd(ProjectCmdBase):
     def get_run_on(self, args):
         if args.run_on_all_branches:
             return self.RUN_ON_ALL
+        if args.cron:
+            return f"""
+  schedule:
+    - cron: '{args.cron}'"""
+
         return f"""
   push:
     branches:
@@ -1203,7 +1216,11 @@ jobs:
             help="Allow CI to fire on all branches - Handy for testing",
         )
         parser.add_argument(
-            "--ubuntu-version", default="20.04", help="Version of Ubuntu to use"
+            "--ubuntu-version", default="22.04", help="Version of Ubuntu to use"
+        )
+        parser.add_argument(
+            "--cron",
+            help="Specify that the job runs on a cron schedule instead of on pushes",
         )
         parser.add_argument(
             "--main-branch",
@@ -1323,9 +1340,26 @@ def parse_args():
         default=False,
     )
     add_common_arg(
+        "-su",
+        "--skip-upload",
+        help="skip upload steps",
+        action="store_true",
+        default=False,
+    )
+    add_common_arg(
         "--lfs-path",
         help="Provide a parent directory for lfs when fbsource is unavailable",
         default=None,
+    )
+    add_common_arg(
+        "--build-skip-lfs-download",
+        action="store_true",
+        default=False,
+        help=(
+            "Download from the URL, rather than LFS. This is useful "
+            "in cases where the upstream project has uploaded a new "
+            "version of the archive with a different hash"
+        ),
     )
 
     ap = argparse.ArgumentParser(

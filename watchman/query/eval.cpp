@@ -6,8 +6,10 @@
  */
 
 #include "watchman/query/eval.h"
+
 #include <fmt/chrono.h>
 #include <folly/ScopeGuard.h>
+
 #include "watchman/CommandRegistry.h"
 #include "watchman/Errors.h"
 #include "watchman/PerfSample.h"
@@ -20,6 +22,8 @@
 #include "watchman/root/Root.h"
 #include "watchman/saved_state/SavedStateInterface.h"
 #include "watchman/scm/SCM.h"
+#include "watchman/telemetry/LogEvent.h"
+#include "watchman/telemetry/WatchmanStructuredLogger.h"
 
 using namespace watchman;
 
@@ -156,6 +160,7 @@ static void default_generators(
 
 static void execute_common(
     QueryContext* ctx,
+    QueryExecute* queryExecute,
     PerfSample* sample,
     QueryResult* res,
     QueryGenerator generator) {
@@ -212,6 +217,10 @@ static void execute_common(
       }
     }
 
+    // NOTE: sample and queryExecute are either both non-null or both null
+    queryExecute->num_special_files = ctx->namesToLog.size();
+    queryExecute->special_files = json_array(nameList).toString();
+
     sample->add_meta(
         "num_special_files_in_result_set",
         json_integer(ctx->namesToLog.size()));
@@ -220,19 +229,42 @@ static void execute_common(
     sample->force_log();
   }
 
-  if (sample && sample->finish()) {
-    ctx->root->addPerfSampleMetadata(*sample);
-    auto meta = json_object({
-        {"fresh_instance", json_boolean(res->isFreshInstance)},
-        {"num_deduped", json_integer(ctx->num_deduped)},
-        {"num_results", json_integer(ctx->resultsArray.size())},
-        {"num_walked", json_integer(ctx->getNumWalked())},
-    });
-    if (ctx->query->query_spec) {
-      meta.set("query", json_ref(*ctx->query->query_spec));
+  if (sample) {
+    // NOTE: sample and queryExecute are either both non-null or both null
+    auto root_metadata = ctx->root->getRootMetadata();
+
+    if (sample->finish()) {
+      sample->add_root_metadata(root_metadata);
+      auto meta = json_object({
+          {"fresh_instance", json_boolean(res->isFreshInstance)},
+          {"num_deduped", json_integer(ctx->num_deduped)},
+          {"num_results", json_integer(ctx->resultsArray.size())},
+          {"num_walked", json_integer(ctx->getNumWalked())},
+      });
+      if (ctx->query->query_spec) {
+        meta.set("query", json_ref(*ctx->query->query_spec));
+      }
+      sample->add_meta("query_execute", std::move(meta));
+      sample->log();
     }
-    sample->add_meta("query_execute", std::move(meta));
-    sample->log();
+
+    const auto& [samplingRate, eventCount] =
+        getLogEventCounters(LogEventType::QueryExecuteType);
+    // Log if override set, or if we have hit the sample rate
+    if (sample->will_log || eventCount == samplingRate) {
+      addRootMetadataToEvent(root_metadata, *queryExecute);
+      queryExecute->event_count = eventCount != samplingRate ? 0 : eventCount;
+      queryExecute->fresh_instance = res->isFreshInstance;
+      queryExecute->deduped = ctx->num_deduped;
+      queryExecute->results = ctx->resultsArray.size();
+      queryExecute->walked = ctx->getNumWalked();
+
+      if (ctx->query->query_spec) {
+        queryExecute->query = ctx->query->query_spec->toString();
+      }
+
+      getLogger()->logEvent(*queryExecute);
+    }
   }
 
   res->resultsArray = ctx->renderResults();
@@ -252,9 +284,11 @@ QueryResult w_query_execute(
   bool disableFreshInstance{false};
   auto requestId = query->request_id;
 
+  QueryExecute queryExecute;
   PerfSample sample("query_execute");
   if (requestId && !requestId->empty()) {
     log(DBG, "request_id = ", *requestId, "\n");
+    queryExecute.request_id = requestId->string();
     sample.add_meta("request_id", w_string_to_json(*requestId));
   }
 
@@ -297,8 +331,8 @@ QueryResult w_query_execute(
             query->since_spec->savedStateConfig.value(),
             scm,
             root->config,
-            [root](PerfSample& sample) {
-              root->addPerfSampleMetadata(sample);
+            [root](RootMetadata& root_metadata) {
+              root->collectRootMetadata(root_metadata);
             });
         auto savedStateResult = savedStateInterface->getMostRecentSavedState(
             resultClock.scmMergeBase ? resultClock.scmMergeBase->piece()
@@ -445,11 +479,11 @@ QueryResult w_query_execute(
       QueryResult r;
       c.clockAtStartOfQuery = ctx.clockAtStartOfQuery;
       c.since = ctx.since;
-      execute_common(&c, nullptr, &r, generator);
+      execute_common(&c, nullptr, nullptr, &r, generator);
     }
   }
 
-  execute_common(&ctx, &sample, &res, generator);
+  execute_common(&ctx, &queryExecute, &sample, &res, generator);
   return res;
 }
 

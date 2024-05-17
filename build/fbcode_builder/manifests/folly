@@ -16,6 +16,7 @@ gflags
 glog
 googletest
 boost
+libdwarf
 libevent
 libsodium
 double-conversion
@@ -41,6 +42,10 @@ openssl
 [dependencies.os=windows]
 openssl
 zlib
+
+[dependencies.os=linux]
+libiberty
+libunwind
 
 # xz depends on autoconf which does not build on
 # Windows
